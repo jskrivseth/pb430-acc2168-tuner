@@ -255,9 +255,12 @@ $bytes = Assemble-Asm $asmPath
 # ---- 8086 Emulator Test Harness ----
 $hwRegs = @{ 0x04 = 0x54; 0x05 = 0x18; 0x0B = 0x05; 0x18 = 0x00; 0x19 = 0x00 }
 $vgaPresent = $true
+$nonCirrusMode = 'unmapped' # 'unmapped' (reads FFh) or 'scratch' (generic R/W SR06)
+$nonCirrusSr06Init = 0x5A
+$nonCirrusSr06 = $nonCirrusSr06Init
 $vgaIdxInit = 0x03
 $vgaIdx = $vgaIdxInit
-$vgaRegs = @{ 0x06 = 0x0F; 0x0F = 0x10; 0x16 = 0xD8; 0x17 = 0x31; 0x1F = 0x1C }
+$vgaRegs = @{ 0x06 = 0x12; 0x0F = 0x10; 0x16 = 0xD8; 0x17 = 0x31; 0x1F = 0x1C }
 
 function Run-Emu([string]$cmdTail) {
     $mem = New-Object byte[] 0x10000
@@ -272,6 +275,7 @@ function Run-Emu([string]$cmdTail) {
     $idx = 0; $ioBad = $false; $writes = 0; $writeOrder = New-Object System.Collections.Generic.List[byte]
     $vgaTouches = 0; $vgaWrites = 0; $vgaUnlockedAccess = $false; $out = ""; $rc = -1
     $script:vgaIdx = $script:vgaIdxInit
+    $script:nonCirrusSr06 = $script:nonCirrusSr06Init
 
     $getR8 = { param($n) if ($n -lt 4) { $r[$n] -band 0xFF } else { ($r[$n-4] -shr 8) -band 0xFF } }
     $setR8 = { param($n,$v) $v = $v -band 0xFF; if ($n -lt 4) { $r[$n] = ($r[$n] -band 0xFF00) -bor $v } else { $r[$n-4] = ($r[$n-4] -band 0x00FF) -bor ($v -shl 8) } }
@@ -411,7 +415,8 @@ function Run-Emu([string]$cmdTail) {
                 } elseif ($port -eq 0x3C5) {
                     $vgaTouches++
                     if ($script:vgaIdx -eq 0x06) {
-                        if ($script:vgaPresent) { $script:vgaRegs[0x06] = $(if ($al -eq 0x12) { 0x12 } else { 0x0F }) }
+                        if ($script:vgaPresent) { $script:vgaRegs[0x06] = $(if (($al -band 0x17) -eq 0x12) { 0x12 } else { 0x0F }) }
+                        elseif ($script:nonCirrusMode -eq 'scratch') { $script:nonCirrusSr06 = $al }
                     } else {
                         if (-not $script:vgaPresent -or $script:vgaRegs[0x06] -ne 0x12) { $vgaUnlockedAccess = $true }
                         else { $script:vgaRegs[$script:vgaIdx] = $al; $vgaWrites++ }
@@ -425,7 +430,10 @@ function Run-Emu([string]$cmdTail) {
                     $vgaTouches++; & $setR8 0 $script:vgaIdx
                 } elseif ($port -eq 0x3C5) {
                     $vgaTouches++
-                    if (-not $script:vgaPresent) { & $setR8 0 0xFF }
+                    if (-not $script:vgaPresent) {
+                        if ($script:vgaIdx -eq 0x06 -and $script:nonCirrusMode -eq 'scratch') { & $setR8 0 $script:nonCirrusSr06 }
+                        else { & $setR8 0 0xFF }
+                    }
                     elseif ($script:vgaIdx -eq 0x06) { & $setR8 0 $script:vgaRegs[0x06] }
                     elseif ($script:vgaRegs[0x06] -ne 0x12) { $vgaUnlockedAccess = $true; & $setR8 0 0xFF }
                     else { & $setR8 0 $script:vgaRegs[$script:vgaIdx] }
@@ -443,7 +451,8 @@ function Run-Emu([string]$cmdTail) {
         }
         if ($rc -ge 0) { break }
     }
-    $vgaClean = ($script:vgaIdx -eq $script:vgaIdxInit) -and (-not $vgaUnlockedAccess) -and (-not $script:vgaPresent -or $script:vgaRegs[0x06] -eq 0x0F)
+    $sr06Ok = if ($script:vgaPresent) { ($vgaTouches -eq 0) -or ($script:vgaRegs[0x06] -eq 0x12) } else { $script:nonCirrusSr06 -eq $script:nonCirrusSr06Init }
+    $vgaClean = ($script:vgaIdx -eq $script:vgaIdxInit) -and (-not $vgaUnlockedAccess) -and $sr06Ok
     return @{ Rc=$rc; Out=$out; Writes=$writes; Order=$writeOrder.ToArray(); VgaTouches=$vgaTouches; VgaWrites=$vgaWrites; Safe=($iflag -and -not $ioBad -and $vgaClean) }
 }
 
@@ -490,30 +499,39 @@ if ($rBr.Order[0] -ne 0x19 -or $rBr.Order[1] -ne 0x18) { throw "Expected 19h wri
 $null    = Assert-Run " /br8 /r8"        0 3 0xD4 0x1A 0x05 0x03 0x07 "State: PW=ON RF=/8 BR=8 AT=OFF W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
 $null    = Assert-Run " /br1 /at+"       0 2 0xD4 0x1A 0x05 0x02 0x00 "State: PW=ON RF=/8 BR=1 AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
 $null    = Assert-Run " /br-"            0 2 0xD4 0x1A 0x05 0x00 0x00 "State: PW=ON RF=/8 BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
-$null    = Assert-Run " /off"            0 5 0x54 0x18 0x05 0x00 0x00 "State: PW=OFF RF=/2 BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+$null    = Assert-Run " /off"            0 5 0x54 0x18 0x05 0x00 0x00 "VGA:   SR0F=10 SR16=D8 SR17=31 SR1F=1C VIO=2T" 2
 
-# Cirrus VGA read-only + tuning + bit-preservation + non-Cirrus safety tests
+# Cirrus VGA read-only + tuning + SR06=12h SVGA-unlock + bit-preservation + non-Cirrus safety tests
+$vgaRegs[0x06] = 0x0F # Simulate SR06 previously locked; /v must re-unlock SR06=12h for VESA/SVGA BIOS
 $null    = Assert-Run " /v"              0 0 0x54 0x18 0x05 0x00 0x00 "VGA:   SR0F=10 SR16=D8 SR17=31 SR1F=1C VIO=2T" 0
 $null    = Assert-Run " /vio"            0 0 0x54 0x18 0x05 0x00 0x00 "VGA:   SR0F=10 SR16=18 SR17=31 SR1F=1C VIO=1T" 1
 if ($vgaRegs[0x16] -ne 0x18 -or $vgaRegs[0x1F] -ne 0x1C) { throw "VGA reg mismatch after /vio" }
 $null    = Assert-Run " /vm"             0 0 0x54 0x18 0x05 0x00 0x00 "VGA:   SR0F=10 SR16=18 SR17=31 SR1F=1E VIO=1T" 1
 if ($vgaRegs[0x1F] -ne 0x1E) { throw "VGA SR1F mismatch after /vm" }
 $null    = Assert-Run " /pw /r8 /br4 /at- /vio /vm57" 0 4 0xD4 0x1A 0x05 0x03 0x03 "VGA:   SR0F=10 SR16=18 SR17=31 SR1F=20 VIO=1T" 2
-if ($vgaRegs[0x16] -ne 0x18 -or $vgaRegs[0x1F] -ne 0x20) { throw "VGA reg mismatch after /vm57" }
+if ($vgaRegs[0x16] -ne 0x18 -or $vgaRegs[0x1F] -ne 0x20 -or $vgaRegs[0x06] -ne 0x12) { throw "VGA reg/SR06 mismatch after /vm57" }
 $null    = Assert-Run " /vm61"           0 0 0xD4 0x1A 0x05 0x03 0x03 "VGA:   SR0F=10 SR16=18 SR17=31 SR1F=22 VIO=1T" 1
 $null    = Assert-Run " /vm64"           0 0 0xD4 0x1A 0x05 0x03 0x03 "VGA:   SR0F=10 SR16=18 SR17=31 SR1F=24 VIO=1T" 1
 $null    = Assert-Run " /vio- /vm-"      0 0 0xD4 0x1A 0x05 0x03 0x03 "VGA:   SR0F=10 SR16=D8 SR17=31 SR1F=1C VIO=2T" 2
-# Verify SR16 b5:0 and SR1F b7:6 are preserved
+# Verify SR16 b5:0 and SR1F b7:6 are preserved across /VIO /VM57 AND across /OFF
 $vgaRegs[0x16] = 0xE5; $vgaRegs[0x1F] = 0x5C
 $null    = Assert-Run " /vio /vm57"      0 0 0xD4 0x1A 0x05 0x03 0x03 "VGA:   SR0F=10 SR16=25 SR17=31 SR1F=60 VIO=1T" 2
-# Verify non-Cirrus card aborts safely with RC=2 and ZERO ACC or VGA writes
-$vgaPresent = $false
-$null    = Assert-Run " /pw- /vio /vm57" 2 0 0xD4 0x1A 0x05 0x03 0x03 "Cirrus CL-GD542x VGA not detected" 0
-$vgaPresent = $true
-# Verify /OFF resets ACC registers without touching VGA
+$vgaRegs[0x06] = 0x0F # Also verify /0 unlocks SR06=12h while resetting both ACC and Cirrus VGA
 $hwRegs[4] = 0x95; $hwRegs[5] = 0x1B; $hwRegs[0x18] = 0x13; $hwRegs[0x19] = 0xA7
-$null    = Assert-Run " /0"              0 5 0x15 0x18 0x05 0x00 0xA0 "State: PW=OFF RF=/2 BR=OFF AT=ON W486=STD CASW=2T PWWS=1WS L2=ON" 0 0
-if ($vgaRegs[0x16] -ne 0x25 -or $vgaRegs[0x1F] -ne 0x60) { throw "/0 unexpectedly modified VGA regs" }
+$null    = Assert-Run " /0"              0 5 0x15 0x18 0x05 0x00 0xA0 "VGA:   SR0F=10 SR16=E5 SR17=31 SR1F=5C VIO=2T" 2
+if ($vgaRegs[0x16] -ne 0xE5 -or $vgaRegs[0x1F] -ne 0x5C -or $vgaRegs[0x06] -ne 0x12) { throw "/0 failed to reset VGA regs cleanly" }
+# Verify /OFF + /VM54 composes left-to-right
+$null    = Assert-Run " /off /vm54"      0 5 0x15 0x18 0x05 0x00 0xA0 "VGA:   SR0F=10 SR16=E5 SR17=31 SR1F=5E VIO=2T" 2
+# Verify non-Cirrus cards (both unmapped FFh and generic scratch SR06) abort RC=2 on explicit VGA flags,
+# while /OFF still resets ACC cleanly with RC=0 and 0 VGA extension writes!
+$vgaPresent = $false; $nonCirrusMode = 'unmapped'
+$null    = Assert-Run " /pw /vio /vm57"  2 0 0x15 0x18 0x05 0x00 0xA0 "Cirrus CL-GD542x VGA not detected" 0
+$nonCirrusMode = 'scratch'
+$null    = Assert-Run " /off /vm54"      2 0 0x15 0x18 0x05 0x00 0xA0 "Cirrus CL-GD542x VGA not detected" 0
+$hwRegs[4] = 0x95; $hwRegs[5] = 0x1B
+$rOffNC  = Assert-Run " /off"            0 5 0x15 0x18 0x05 0x00 0xA0 "State: PW=OFF RF=/2 BR=OFF AT=ON W486=STD CASW=2T PWWS=1WS L2=ON" 0
+if ($rOffNC.Out.Contains("VGA:")) { throw "/off printed VGA line when Cirrus absent" }
+$vgaPresent = $true
 
 $hash = (Get-FileHash $outPath -Algorithm SHA256).Hash
 Write-Host "Built $outPath ($($bytes.Length) bytes), $testCount/$testCount emulation tests passed!"

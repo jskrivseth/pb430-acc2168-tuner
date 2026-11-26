@@ -12,7 +12,7 @@
 ;   ACCTUNE /V               Read-only Cirrus CL-GD542x VGA register status
 ;   ACCTUNE /VIO+ | /VIO-    Cirrus VLB 1T/2T I/O RDY# (SR16 b7:6)
 ;   ACCTUNE /VM50..64 | /VM- Cirrus MCLK MHz (/VM=/VM54=1Eh, /VM-=/VM50=1Ch)
-;   ACCTUNE /OFF             Reset ACC tuned bits to safe stock (or /STOCK, /0)
+;   ACCTUNE /OFF             Reset ACC & Cirrus tuned bits to stock (/STOCK, /0)
 ;   (Shorthand without '+' enables the flag, e.g. /PW /R8 /BR4 /AT- /VIO /VM57)
 ;
 ; Build with NASM:
@@ -137,9 +137,9 @@ show_help:
         int     21h
 
 do_apply:
-        ; If any Cirrus VGA flag was requested, verify Cirrus presence BEFORE any writes
+        ; If an explicit Cirrus VGA flag (/V, /VIO*, /VM*) was given, require Cirrus
         cmp     byte [want_vga], 0
-        je      apply_acc
+        je      check_off_vga
         call    vga_probe
         cmp     al, 0
         jne     apply_acc
@@ -147,6 +147,18 @@ do_apply:
         call    print_str
         mov     ax, 4C02h
         int     21h
+
+check_off_vga:
+        ; /OFF opportunistically resets Cirrus VGA if detected, else skips VGA cleanly
+        cmp     byte [off_vga], 0
+        je      apply_acc
+        call    vga_probe
+        cmp     al, 0
+        je      skip_off_vga
+        mov     byte [want_vga], 1
+        jmp     short apply_acc
+skip_off_vga:
+        mov     byte [has_vga_chg], 0
 
 apply_acc:
         cmp     byte [has_chg], 0
@@ -253,6 +265,10 @@ mf_cmp:
         cmp     al, 0FFh
         je      mf_off
 
+        cmp     al, 5
+        jb      mf_stage
+        mov     byte [want_vga], 1
+mf_stage:
         call    stage_slot
         mov     al, 1
         ret
@@ -294,7 +310,8 @@ mf_help:
 
 mf_off:
         ; Reset all tuned bits to safe stock:
-        ; 04 b7=0, 05 b1:0=00, 0B b1:0=01, 19 b2:0=00, 18 b4=0 & b1:0=00
+        ; ACC: 04 b7=0, 05 b1:0=00, 0B b1:0=01, 19 b2:0=00, 18 b4=0 & b1:0=00
+        ; VGA (if Cirrus detected): SR16 b7:6=C0h (2T I/O), SR1F b5:0=1Ch (50.1 MHz)
         mov     al, 0
         mov     bh, 7Fh
         mov     bl, 00h
@@ -315,6 +332,15 @@ mf_off:
         mov     bh, 0ECh
         mov     bl, 00h
         call    stage_slot
+        mov     al, 5
+        mov     bh, 3Fh
+        mov     bl, 0C0h
+        call    stage_slot
+        mov     al, 6
+        mov     bh, 0C0h
+        mov     bl, 1Ch
+        call    stage_slot
+        mov     byte [off_vga], 1
         mov     al, 1
         ret
 
@@ -340,7 +366,6 @@ stage_slot:
         ret
 ss_vga:
         mov     byte [has_vga_chg], 1
-        mov     byte [want_vga], 1
         ret
 
 ; ---- acc_read: read ACC2168 reg AL -> AL ----
@@ -372,7 +397,9 @@ acc_rmw:
         sti
         ret
 
-; ---- vga_probe: detect Cirrus CL-GD542x via SR06 unlock/readback -> AL=1/0 ----
+; ---- vga_probe: detect Cirrus CL-GD542x via SR06 lock/unlock -> AL=1/0 ----
+; Leaves SR06 = 12h unlocked when Cirrus is detected (Cirrus BIOS checks SR06==12h
+; before allowing VESA VBE INT 10h AH=4Fh or SVGA modes > 13h).
 vga_probe:
         cli
         mov     dx, 03C4h
@@ -383,15 +410,19 @@ vga_probe:
         inc     dx                  ; DX = 3C5h
         in      al, dx
         mov     bh, al              ; BH = original SR06
-        mov     al, 12h
+        xor     al, al              ; lock check: writing 00h reads back 0Fh on Cirrus
+        out     dx, al
+        out     0EDh, al
+        in      al, dx
+        cmp     al, 0Fh
+        jne     vp_not_cirrus
+        mov     al, 12h             ; unlock check: writing 12h reads back 12h on Cirrus
         out     dx, al
         out     0EDh, al
         in      al, dx
         cmp     al, 12h
         jne     vp_not_cirrus
-        xor     al, al              ; re-lock Cirrus (SR06 = 00h -> 0Fh)
-        out     dx, al
-        mov     al, 1
+        mov     al, 1               ; keep SR06 = 12h unlocked for SVGA/VESA BIOS
         jmp     short vp_done
 vp_not_cirrus:
         mov     al, bh              ; restore SR06 on non-Cirrus
@@ -406,7 +437,7 @@ vp_done:
         mov     al, bh
         ret
 
-; ---- vga_read: read Cirrus SR[AL] -> AL (unlocks/relocks SR06) ----
+; ---- vga_read: read Cirrus SR[AL] -> AL (keeps SR06 = 12h unlocked) ----
 vga_read:
         cli
         mov     bl, al              ; BL = target SR index
@@ -426,19 +457,13 @@ vga_read:
         in      al, dx
         mov     bl, al              ; BL = read value
         dec     dx                  ; 3C4h
-        mov     al, 06h
-        out     dx, al
-        inc     dx                  ; 3C5h
-        xor     al, al
-        out     dx, al
-        dec     dx                  ; 3C4h
-        mov     al, bh
+        mov     al, bh              ; restore original 3C4h index
         out     dx, al
         sti
         mov     al, bl
         ret
 
-; ---- vga_rmw: RMW Cirrus SR[AL] = (val & BH) | BL (unlocks/relocks SR06) ----
+; ---- vga_rmw: RMW Cirrus SR[AL] = (val & BH) | BL (keeps SR06 = 12h unlocked) ----
 vga_rmw:
         cli
         push    ax                  ; save target SR index
@@ -462,12 +487,6 @@ vga_rmw:
         or      al, bl
         out     dx, al
         out     0EDh, al
-        dec     dx                  ; 3C4h
-        mov     al, 06h
-        out     dx, al
-        inc     dx                  ; 3C5h
-        xor     al, al
-        out     dx, al
         dec     dx                  ; 3C4h
         pop     ax                  ; AL = original 3C4h index
         out     dx, al
@@ -763,6 +782,7 @@ vga_tbl:
 has_chg     db 0
 has_vga_chg db 0
 want_vga    db 0
+off_vga     db 0
 want_help   db 0
 tok_len     db 0
 tok_buf     db 0, 0, 0, 0, 0, 0, 0, 0
@@ -790,7 +810,7 @@ msg_help  db 'Flags (opt-in, combinable; omit + to enable):', 0Dh, 0Ah
           db '  /V              Read-only Cirrus CL-GD542x VGA register status', 0Dh, 0Ah
           db '  /VIO+ /VIO-     Cirrus VLB 1T/2T I/O RDY# (SR16 b7:6)', 0Dh, 0Ah
           db '  /VM50..64 /VM-  Cirrus MCLK MHz (50/54/55/57/59/61/63/64; /VM=54)', 0Dh, 0Ah
-          db '  /OFF            Reset ACC tuned bits to stock (/STOCK, /0)', 0Dh, 0Ah, '$'
+          db '  /OFF            Reset ACC & Cirrus tuned bits to stock (/STOCK, /0)', 0Dh, 0Ah, '$'
 
 s_r04     db 'Regs:  04=$'
 s_r05     db ' 05=$'

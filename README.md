@@ -1,6 +1,6 @@
 # pb430-acc2168-tuner (`ACCTUNE.COM`)
 
-A tiny (2,585-byte) pure 16-bit MS-DOS opt-in chipset and onboard Cirrus Logic VGA tuner for **ACC Micro 2046 / 2168 / 2168GT** 486 motherboards, developed and real-hardware tested on a **Packard Bell PB430** (Legend Elite 2038).
+A tiny (2,639-byte) pure 16-bit MS-DOS opt-in chipset and onboard Cirrus Logic VGA tuner for **ACC Micro 2046 / 2168 / 2168GT** 486 motherboards, developed and real-hardware tested on a **Packard Bell PB430** (Legend Elite 2038).
 
 Running `ACCTUNE` with **no arguments** is completely **read-only**: it prints the live ACC2168 register values (`04h`, `05h`, `0Bh`, `18h`, `19h`), decoded state, and usage help without modifying hardware (and without touching VGA ports unless a Cirrus VGA flag is requested). Every tweak is strictly opt-in, combinable, and reversible.
 
@@ -18,13 +18,13 @@ ACCTUNE /P0+  | /P0-        0-WS/1-WS Posted Write (18h b4; experimental)
 ACCTUNE /V                  Read-only Cirrus CL-GD542x VGA status (/VGA)
 ACCTUNE /VIO+ | /VIO-       Cirrus VLB 1T/2T I/O RDY# (SR16 b7:6)
 ACCTUNE /VM50..64 | /VM-    Cirrus MCLK MHz (50/54/55/57/59/61/63/64; /VM=54, /VM-=50)
-ACCTUNE /OFF                Reset ACC tuned bits back to safe stock (also /STOCK, /0)
+ACCTUNE /OFF                Reset ACC & Cirrus tuned bits to stock (also /STOCK, /0)
 ```
 
 - Flags are **case-insensitive**, accept `/` or `-`, and **omit `+` as shorthand to enable** (e.g. `ACCTUNE /PW /R8 /BR4 /AT- /VIO /VM57`; `/R` = `/R4`, `/BR` = `/BR4`, `/VM` = `/VM54`).
-- Flags are **combinable** in one command (e.g. `ACCTUNE /PW /R8 /BR4 /AT- /VIO /VM57`, `ACCTUNE /PW- /R4`).
+- Flags are **combinable** in one command (e.g. `ACCTUNE /PW /R8 /BR4 /AT- /VIO /VM57`, `ACCTUNE /OFF /VM54`).
 - Only registers explicitly referenced by your flags are written (`19h` is always written before `18h` so burst count is set before enabling burst refresh); unrecognized flags exit with errorlevel `1` without touching hardware.
-- Cirrus VGA flags (`/V`, `/VIO*`, `/VM*`) probe `SR06` (`12h` unlock readback) **before writing any registers**; if no Cirrus `CL-GD542x` is detected, `ACCTUNE` aborts safely with errorlevel `2` without modifying hardware. Every Cirrus access unlocks `SR06 = 12h`, performs atomic RMW under `CLI`/`STI`, re-locks `SR06 = 00h`, and restores the original `3C4h` index.
+- Cirrus VGA flags (`/V`, `/VIO*`, `/VM*`) probe `SR06` (`00h -> 0Fh` lock and `12h -> 12h` unlock readback) **before writing any registers**; if no Cirrus `CL-GD542x` is detected, `ACCTUNE` aborts safely with errorlevel `2` without modifying hardware. `/OFF` resets both ACC registers and (when a Cirrus card is present) Cirrus `SR16`/`SR1F`, while quietly skipping VGA on non-Cirrus systems. When Cirrus hardware is detected, `SR06` is kept unlocked (`12h`, matching POST) so Cirrus VESA VBE (`INT 10h AH=4Fh`) and SVGA modes remain enabled, and the original `3C4h` index is restored.
 - Every ACC write uses atomic read-modify-write under `CLI`/`STI` with `0EDh` I/O delays, preserving unrelated bits (such as L2 cache enable `04h b0`, DRAM burst `04h b4`, Page Mode `05h b4`, and burst RAS width `19h b7:4`).
 
 ### Example Output
@@ -45,7 +45,7 @@ Flags (opt-in, combinable; omit + to enable):
   /V              Read-only Cirrus CL-GD542x VGA register status
   /VIO+ /VIO-     Cirrus VLB 1T/2T I/O RDY# (SR16 b7:6)
   /VM50..64 /VM-  Cirrus MCLK MHz (50/54/55/57/59/61/63/64; /VM=54)
-  /OFF            Reset ACC tuned bits to stock (/STOCK, /0)
+  /OFF            Reset ACC & Cirrus tuned bits to stock (/STOCK, /0)
 ```
 
 ### Recommended `AUTOEXEC.BAT` Profiles
@@ -54,7 +54,7 @@ Flags (opt-in, combinable; omit + to enable):
   ```bat
   C:\UTILS\ACCTUNE.COM /PW /R8 /BR4 /AT- /VIO /VM57
   ```
-  *(Use `/VM54` for a cooler 53.7 MHz MCLK with nearly identical DOOM speed, or omit `/VIO /VM57` on non-Cirrus boards.)*
+  *(Use `/VM54` for a cooler 53.7 MHz MCLK with nearly identical DOOM speed, `/VM64` for up to 64.4 MHz if your chip/VRAM tolerates it cleanly in SVGA, or omit `/VIO /VM57` on non-Cirrus boards.)*
 - **Chipset-only max tested (no VGA changes):**
   ```bat
   C:\UTILS\ACCTUNE.COM /PW /R8 /BR4 /AT-
@@ -63,10 +63,10 @@ Flags (opt-in, combinable; omit + to enable):
   ```bat
   C:\UTILS\ACCTUNE.COM /PW /R
   ```
-- **Disable Posted Write on the fly or revert ACC / Cirrus tweaks back to stock:**
+- **Disable Posted Write on the fly or revert all ACC & Cirrus tweaks back to stock:**
   ```bat
   C:\UTILS\ACCTUNE.COM /PW-
-  C:\UTILS\ACCTUNE.COM /OFF /VIO- /VM-
+  C:\UTILS\ACCTUNE.COM /OFF
   ```
 
 ## Notes on ISA DMA Digital Audio & Clean Boot
@@ -87,6 +87,7 @@ Tested on a **Packard Bell Legend Elite 2038** (PB430 LPX motherboard, ACC Micro
 | `ACCTUNE /PW /R /BR4 /AT- /VM54` | `D4h` | `19h` | `05h` | `03h` | `03h` | `D8`/`1E` | — | `32.38 FPS` | **+11.3% FPS**; 53.7 MHz MCLK crosses Cirrus 0-WS threshold |
 | `ACCTUNE /PW /R /BR4 /AT- /VIO /VM57` | `D4h` | `19h` | `05h` | `03h` | `03h` | `18`/`20` | — | `32.43 FPS` | **+11.5% FPS**; 1T VLB I/O + 57.3 MHz MCLK |
 | `ACCTUNE /PW /R8 /BR4 /AT- /VIO /VM57` | `D4h` | `1Ah` | `05h` | `03h` | `03h` | `18`/`20` | — | `32.54 FPS` | **+11.9% FPS**; `/8` DRAM refresh + Cirrus VLB tuning |
+| `ACCTUNE /PW /R8 /BR4 /AT- /VIO /VM64` | `D4h` | `1Ah` | `05h` | `03h` | `03h` | `18`/`24` | — | `32.57 FPS` | **+12.0% FPS**; 64.4 MHz MCLK (no artifacts in DOOM) |
 | `ACCTUNE /PW /C1` | `D4h` | `18h` | `04h` | `00h` | `00h` | `D8`/`1C` | `42.76` | *(unstable)* | Failed SpeedSys extended memtest at 33 MHz on 70 ns SIMMs |
 | `ACCTUNE /PW /P0` | `D4h` | `18h` | `05h` | `10h` | `00h` | `D8`/`1C` | `42.76` | *(crashes)* | Crashed DOOM (`R_MapPlane`) within seconds at 33 MHz |
 
@@ -110,11 +111,11 @@ Accessed via index port `0F2h` and data port `0F3h`:
 
 ## Register Reference (Cirrus Logic CL-GD5424 / 5426 / 5428 VLB)
 
-Accessed via Sequencer ports `3C4h`/`3C5h` after unlocking `SR06 = 12h` (always re-locked to `00h` afterward):
+Accessed via Sequencer ports `3C4h`/`3C5h` with `SR06 = 12h` unlocked (left unlocked matching POST, because Cirrus VGA BIOS checks `SR06 == 12h` before enabling VESA VBE `INT 10h AH=4Fh` and SVGA video modes):
 
 | Register | Bits | Function |
 | :---: | :---: | :--- |
-| `SR06` | `7:0` | Extension Unlock (`12h` = unlocked, `00h` = re-locked / reads `0Fh`) |
+| `SR06` | `7:0` | Extension Unlock (`12h` = unlocked / SVGA & VESA enabled; `00h` reads `0Fh` = pure-VGA lock) |
 | `SR16` | `7:6` | VLB I/O `RDY#` delay (`00`/`01` = 1T `/VIO+`, `10`/`11` = 2T `/VIO-`); `b5:4` (VLB Mem Write `RDY#`, already 0-WS at 33 MHz) and `b3:0` (CRT FIFO threshold) are preserved |
 | `SR1F` | `5:0` | MCLK = `1.78977 MHz × val` (`1Ch`=50.1, `1Eh`=53.7, `1Fh`=55.5, `20h`=57.3, `21h`=59.1, `22h`=60.9, `23h`=62.6, `24h`=64.4 MHz); `b7:6` are preserved |
 
@@ -134,16 +135,16 @@ With [NASM](https://www.nasm.us/):
 nasm -f bin acctune.asm -o ACCTUNE.COM
 ```
 
-Or on Windows with zero external dependencies (assembles `acctune.asm` directly and runs a 34-case 8086 emulation test suite):
+Or on Windows with zero external dependencies (assembles `acctune.asm` directly and runs a 37-case 8086 emulation test suite):
 
 ```powershell
 .\build.ps1
 ```
 
-Expected SHA-256 of `ACCTUNE.COM` (2,585 bytes):
+Expected SHA-256 of `ACCTUNE.COM` (2,639 bytes):
 
 ```text
-69F05F67392674B0ACA163F697AE1DC4978696CB9B5C9D55422FB636E0EC7A61
+4CAEBF589B639C3B6AA7FC27E21C758BF074DE02DBB56F76189C6153D2354E36
 ```
 
 ## License
