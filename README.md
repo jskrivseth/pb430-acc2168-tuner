@@ -69,6 +69,26 @@ Flags (opt-in, combinable; omit + to enable):
   C:\UTILS\ACCTUNE.COM /OFF
   ```
 
+### Windows 95 & MS-DOS Mode Notes (`/PW` Warning)
+
+On the **PB430 (ACC 2168GT)**, **do not boot or warm-reboot into Windows 95 with `/PW` enabled:**
+
+1. **Why `/PW` breaks Windows 95:** While ACC's reference table (`SYSBIOS.BIN` `0xF6A7`) had Posted Write enabled (`04h = 94h`), Packard Bell explicitly patched the live PB430 cold-boot table (`0x8753`) to `04h = 14h` (`PW=0`). Pure DOS games work fine with `/PW`, but Windows 95's 32-bit protected-mode drivers (`VMM32`/`VCACHE`/32-bit IDE `ESDI_506.PDR`) trigger a read-around-write / bus-arbitration hazard in the ACC2168 posted-write latch, corrupting cached `SYSTEM.DAT`/`USER.DAT` pages in RAM and causing false **"Registry is corrupt"** recovery loops.
+2. **Why warm reboots don't clear it:** ACC2168 `0F2h`/`0F3h` registers are only reset by hardware `PWRGOOD` (full power-off), and PB430 BIOS skips its chipset reset table (`0x8753`) whenever `[40:72] == 1234h` (`0x88F8` warm boot—used by `Ctrl+Alt+Del` and Windows 95's `EXIT` from MS-DOS Mode). If `/PW` is left enabled when exiting MS-DOS Mode, it remains latched across every warm reboot until cleared via `ACCTUNE /PW-` (`/OFF`) or a cold power-off.
+
+**Recommended dual-use setup (Windows 95 + full-speed MS-DOS Mode):**
+- **`C:\AUTOEXEC.BAT` (runs before Windows 95 GUI):** Omit `ACCTUNE`, or omit `/PW` and `/R16` (e.g. `C:\UTILS\ACCTUNE.COM /R8 /BR4 /W0 /VIO /VM57`).
+- **`C:\WINDOWS\DOSSTART.BAT` (runs when entering MS-DOS Mode):** Enable `/PW` for DOS games:
+  ```bat
+  C:\UTILS\ACCTUNE.COM /PW /R8 /BR4 /W0 /VIO /VM61
+  ```
+- **`C:\WINDOWS\COMMAND\WIN95.BAT` (clean return to Windows 95):** Clear `/PW` (or `/OFF`) *before* `EXIT` triggers a warm reboot:
+  ```bat
+  @echo off
+  C:\UTILS\ACCTUNE.COM /PW-
+  EXIT
+  ```
+
 ## Benchmarks (Real Hardware)
 
 Tested on a **Packard Bell Legend Elite 2038** (PB430 LPX motherboard, ACC Micro 2168GT chipset, 33 MHz FSB, no external L2 cache, PNY QuickChip AMD Am5x86-133 in write-through mode, onboard Cirrus Logic VGA):
