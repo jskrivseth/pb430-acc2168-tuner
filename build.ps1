@@ -232,8 +232,14 @@ function Assemble-Asm([string]$asmPath) {
                     if ($dl -eq 'al' -and $sl -eq 'cl') { & $emit @(0xD2, 0xE8) }
                     else { throw "Line $lineNo : unsupported shr" }
                 }
-                'in'  { & $emit @(0xE4, [byte](Parse-Imm $src $labels $pass)) }
-                'out' { & $emit @(0xE6, [byte](Parse-Imm $dst $labels $pass)) }
+                'in'  {
+                    if ($dl -eq 'al' -and $sl -eq 'dx') { & $emit @(0xEC) }
+                    else { & $emit @(0xE4, [byte](Parse-Imm $src $labels $pass)) }
+                }
+                'out' {
+                    if ($dl -eq 'dx' -and $sl -eq 'al') { & $emit @(0xEE) }
+                    else { & $emit @(0xE6, [byte](Parse-Imm $dst $labels $pass)) }
+                }
                 default { throw "Line $lineNo : unsupported op '$op'" }
             }
         }
@@ -248,6 +254,10 @@ $bytes = Assemble-Asm $asmPath
 
 # ---- 8086 Emulator Test Harness ----
 $hwRegs = @{ 0x04 = 0x54; 0x05 = 0x18; 0x0B = 0x05; 0x18 = 0x00; 0x19 = 0x00 }
+$vgaPresent = $true
+$vgaIdxInit = 0x03
+$vgaIdx = $vgaIdxInit
+$vgaRegs = @{ 0x06 = 0x0F; 0x0F = 0x10; 0x16 = 0xD8; 0x17 = 0x31; 0x1F = 0x1C }
 
 function Run-Emu([string]$cmdTail) {
     $mem = New-Object byte[] 0x10000
@@ -259,7 +269,9 @@ function Run-Emu([string]$cmdTail) {
 
     $r = @(0,0,0,0, 0xFFFE, 0, 0, 0) # ax,cx,dx,bx,sp,bp,si,di
     $ip = 0x100; $zf=$false; $cf=$false; $df=$true; $iflag=$true
-    $idx = 0; $ioBad = $false; $writes = 0; $writeOrder = New-Object System.Collections.Generic.List[byte]; $out = ""; $rc = -1
+    $idx = 0; $ioBad = $false; $writes = 0; $writeOrder = New-Object System.Collections.Generic.List[byte]
+    $vgaTouches = 0; $vgaWrites = 0; $vgaUnlockedAccess = $false; $out = ""; $rc = -1
+    $script:vgaIdx = $script:vgaIdxInit
 
     $getR8 = { param($n) if ($n -lt 4) { $r[$n] -band 0xFF } else { ($r[$n-4] -shr 8) -band 0xFF } }
     $setR8 = { param($n,$v) $v = $v -band 0xFF; if ($n -lt 4) { $r[$n] = ($r[$n] -band 0xFF00) -bor $v } else { $r[$n-4] = ($r[$n-4] -band 0x00FF) -bor ($v -shl 8) } }
@@ -391,6 +403,34 @@ function Run-Emu([string]$cmdTail) {
                 if ($mem[$script:ip++] -ne 0xF3) { throw "IN port" }
                 & $setR8 0 $hwRegs[$idx]
             }
+            0xEE {
+                $port = $r[2]; $al = $r[0] -band 0xFF
+                if ($iflag) { $ioBad = $true }
+                if ($port -eq 0x3C4) {
+                    $script:vgaIdx = $al; $vgaTouches++
+                } elseif ($port -eq 0x3C5) {
+                    $vgaTouches++
+                    if ($script:vgaIdx -eq 0x06) {
+                        if ($script:vgaPresent) { $script:vgaRegs[0x06] = $(if ($al -eq 0x12) { 0x12 } else { 0x0F }) }
+                    } else {
+                        if (-not $script:vgaPresent -or $script:vgaRegs[0x06] -ne 0x12) { $vgaUnlockedAccess = $true }
+                        else { $script:vgaRegs[$script:vgaIdx] = $al; $vgaWrites++ }
+                    }
+                } else { throw ("OUT DX port {0:X4}" -f $port) }
+            }
+            0xEC {
+                $port = $r[2]
+                if ($iflag) { $ioBad = $true }
+                if ($port -eq 0x3C4) {
+                    $vgaTouches++; & $setR8 0 $script:vgaIdx
+                } elseif ($port -eq 0x3C5) {
+                    $vgaTouches++
+                    if (-not $script:vgaPresent) { & $setR8 0 0xFF }
+                    elseif ($script:vgaIdx -eq 0x06) { & $setR8 0 $script:vgaRegs[0x06] }
+                    elseif ($script:vgaRegs[0x06] -ne 0x12) { $vgaUnlockedAccess = $true; & $setR8 0 0xFF }
+                    else { & $setR8 0 $script:vgaRegs[$script:vgaIdx] }
+                } else { throw ("IN DX port {0:X4}" -f $port) }
+            }
             0xCD {
                 if ($mem[$script:ip++] -ne 0x21) { throw "INT" }
                 $ah = ($r[0] -shr 8) -band 0xFF
@@ -403,16 +443,19 @@ function Run-Emu([string]$cmdTail) {
         }
         if ($rc -ge 0) { break }
     }
-    return @{ Rc=$rc; Out=$out; Writes=$writes; Order=$writeOrder.ToArray(); Safe=($iflag -and -not $ioBad) }
+    $vgaClean = ($script:vgaIdx -eq $script:vgaIdxInit) -and (-not $vgaUnlockedAccess) -and (-not $script:vgaPresent -or $script:vgaRegs[0x06] -eq 0x0F)
+    return @{ Rc=$rc; Out=$out; Writes=$writes; Order=$writeOrder.ToArray(); VgaTouches=$vgaTouches; VgaWrites=$vgaWrites; Safe=($iflag -and -not $ioBad -and $vgaClean) }
 }
 
 $testCount = 0
-function Assert-Run([string]$cmd, [int]$expRc, [int]$expWrites, [byte]$e04, [byte]$e05, [byte]$e0b, [byte]$e18, [byte]$e19, [string]$mustContain) {
+function Assert-Run([string]$cmd, [int]$expRc, [int]$expWrites, [byte]$e04, [byte]$e05, [byte]$e0b, [byte]$e18, [byte]$e19, [string]$mustContain, [int]$expVgaWrites = 0, [int]$expVgaTouches = -1) {
     $script:testCount++
     $res = Run-Emu $cmd
-    if (-not $res.Safe) { throw "IF safety failed on '$cmd'" }
+    if (-not $res.Safe) { throw "Safety (IF/SR06-lock/3C4-restore) failed on '$cmd'" }
     if ($res.Rc -ne $expRc) { throw "RC mismatch on '$cmd': got $($res.Rc) expected $expRc" }
     if ($res.Writes -ne $expWrites) { throw "Write count mismatch on '$cmd': got $($res.Writes) expected $expWrites" }
+    if ($res.VgaWrites -ne $expVgaWrites) { throw "VGA write count mismatch on '$cmd': got $($res.VgaWrites) expected $expVgaWrites" }
+    if ($expVgaTouches -ge 0 -and $res.VgaTouches -ne $expVgaTouches) { throw "VGA touch count mismatch on '$cmd': got $($res.VgaTouches) expected $expVgaTouches" }
     if ($hwRegs[4] -ne $e04 -or $hwRegs[5] -ne $e05 -or $hwRegs[0xB] -ne $e0b -or $hwRegs[0x18] -ne $e18 -or $hwRegs[0x19] -ne $e19) {
         throw ("Reg mismatch on '{0}': got 04={1:X2} 05={2:X2} 0B={3:X2} 18={4:X2} 19={5:X2}" -f $cmd, $hwRegs[4], $hwRegs[5], $hwRegs[0xB], $hwRegs[0x18], $hwRegs[0x19])
     }
@@ -422,32 +465,55 @@ function Assert-Run([string]$cmd, [int]$expRc, [int]$expWrites, [byte]$e04, [byt
     return $res
 }
 
-$sample0 = (Assert-Run ""                0 0 0x54 0x18 0x05 0x00 0x00 "State: PW=OFF RF=STD BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF").Out
-$null    = Assert-Run " /?"              0 0 0x54 0x18 0x05 0x00 0x00 "Flags (opt-in"
-$null    = Assert-Run " /PW /?"          0 0 0x54 0x18 0x05 0x00 0x00 "Flags (opt-in"
-$null    = Assert-Run " /BOGUS"          1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag"
-$null    = Assert-Run " /PW /BOGUS"      1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag"
-$null    = Assert-Run " /BR9"            1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag"
-$null    = Assert-Run " /"               1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag"
-$null    = Assert-Run " /r"              0 1 0x54 0x19 0x05 0x00 0x00 "State: PW=OFF RF=SLOW BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /pw"             0 1 0xD4 0x19 0x05 0x00 0x00 "State: PW=ON RF=SLOW BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /pw-"            0 1 0x54 0x19 0x05 0x00 0x00 "State: PW=OFF RF=SLOW BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /pw+/r-/w0-"     0 2 0x94 0x18 0x05 0x00 0x00 "State: PW=ON RF=STD BR=OFF AT=ON W486=STD CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /w0+ /c1+ /p0+"  0 3 0xD4 0x18 0x04 0x10 0x00 "State: PW=ON RF=STD BR=OFF AT=ON W486=0WS CASW=1T PWWS=0WS L2=OFF"
-$null    = Assert-Run " /c1- /p0-"       0 2 0xD4 0x18 0x05 0x00 0x00 "State: PW=ON RF=STD BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /at-"            0 1 0xD4 0x18 0x05 0x01 0x00 "State: PW=ON RF=STD BR=OFF AT=OFF W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$rBr     = Assert-Run " /br"             0 2 0xD4 0x18 0x05 0x03 0x03 "State: PW=ON RF=STD BR=4 AT=OFF W486=0WS CASW=2T PWWS=1WS L2=OFF"
+# Pure ACC tests must never touch 3C4h/3C5h ($expVgaTouches = 0)
+$sample0 = (Assert-Run ""                0 0 0x54 0x18 0x05 0x00 0x00 "State: PW=OFF RF=/2 BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0).Out
+$null    = Assert-Run " /?"              0 0 0x54 0x18 0x05 0x00 0x00 "Flags (opt-in" 0 0
+$null    = Assert-Run " /PW /?"          0 0 0x54 0x18 0x05 0x00 0x00 "Flags (opt-in" 0 0
+$null    = Assert-Run " /V /?"           0 0 0x54 0x18 0x05 0x00 0x00 "Flags (opt-in" 0 0
+$null    = Assert-Run " /BOGUS"          1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag" 0 0
+$null    = Assert-Run " /PW /BOGUS"      1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag" 0 0
+$null    = Assert-Run " /BR9"            1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag" 0 0
+$null    = Assert-Run " /VM70"           1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag" 0 0
+$null    = Assert-Run " /"               1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag" 0 0
+$null    = Assert-Run " /r"              0 1 0x54 0x19 0x05 0x00 0x00 "State: PW=OFF RF=/4 BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+$null    = Assert-Run " /r8"             0 1 0x54 0x1A 0x05 0x00 0x00 "State: PW=OFF RF=/8 BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+$null    = Assert-Run " /r16"            0 1 0x54 0x1B 0x05 0x00 0x00 "State: PW=OFF RF=/16 BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+$null    = Assert-Run " /r2"             0 1 0x54 0x18 0x05 0x00 0x00 "State: PW=OFF RF=/2 BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+$null    = Assert-Run " /r4 /pw"         0 2 0xD4 0x19 0x05 0x00 0x00 "State: PW=ON RF=/4 BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+$null    = Assert-Run " /pw-"            0 1 0x54 0x19 0x05 0x00 0x00 "State: PW=OFF RF=/4 BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+$null    = Assert-Run " /pw+/r-/w0-"     0 2 0x94 0x18 0x05 0x00 0x00 "State: PW=ON RF=/2 BR=OFF AT=ON W486=STD CASW=2T PWWS=1WS L2=OFF" 0 0
+$null    = Assert-Run " /w0+ /c1+ /p0+"  0 3 0xD4 0x18 0x04 0x10 0x00 "State: PW=ON RF=/2 BR=OFF AT=ON W486=0WS CASW=1T PWWS=0WS L2=OFF" 0 0
+$null    = Assert-Run " /c1- /p0-"       0 2 0xD4 0x18 0x05 0x00 0x00 "State: PW=ON RF=/2 BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+$null    = Assert-Run " /at-"            0 1 0xD4 0x18 0x05 0x01 0x00 "State: PW=ON RF=/2 BR=OFF AT=OFF W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+$rBr     = Assert-Run " /br"             0 2 0xD4 0x18 0x05 0x03 0x03 "State: PW=ON RF=/2 BR=4 AT=OFF W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
 if ($rBr.Order[0] -ne 0x19 -or $rBr.Order[1] -ne 0x18) { throw "Expected 19h written before 18h on /br, got $($rBr.Order -join ',')" }
-$null    = Assert-Run " /br8 /r"         0 3 0xD4 0x19 0x05 0x03 0x07 "State: PW=ON RF=SLOW BR=8 AT=OFF W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /br1 /at+"       0 2 0xD4 0x19 0x05 0x02 0x00 "State: PW=ON RF=SLOW BR=1 AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /br-"            0 2 0xD4 0x19 0x05 0x00 0x00 "State: PW=ON RF=SLOW BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /pw /r /br4 /at- /c1 /p0" 0 5 0xD4 0x19 0x04 0x13 0x03 "State: PW=ON RF=SLOW BR=4 AT=OFF W486=0WS CASW=1T PWWS=0WS L2=OFF"
-$null    = Assert-Run " /off"            0 5 0x54 0x18 0x05 0x00 0x00 "State: PW=OFF RF=STD BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " -pw -r -br8 -at-" 0 4 0xD4 0x19 0x05 0x03 0x07 "State: PW=ON RF=SLOW BR=8 AT=OFF W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /stock"          0 5 0x54 0x18 0x05 0x00 0x00 "State: PW=OFF RF=STD BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
-# Verify L2-enabled board + custom 19h RAS widths preserve unrelated bits on /OFF
-$hwRegs[4] = 0x95; $hwRegs[5] = 0x19; $hwRegs[0x18] = 0x13; $hwRegs[0x19] = 0xA7
-$null    = Assert-Run " /0"              0 5 0x15 0x18 0x05 0x00 0xA0 "State: PW=OFF RF=STD BR=OFF AT=ON W486=STD CASW=2T PWWS=1WS L2=ON"
+$null    = Assert-Run " /br8 /r8"        0 3 0xD4 0x1A 0x05 0x03 0x07 "State: PW=ON RF=/8 BR=8 AT=OFF W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+$null    = Assert-Run " /br1 /at+"       0 2 0xD4 0x1A 0x05 0x02 0x00 "State: PW=ON RF=/8 BR=1 AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+$null    = Assert-Run " /br-"            0 2 0xD4 0x1A 0x05 0x00 0x00 "State: PW=ON RF=/8 BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+$null    = Assert-Run " /off"            0 5 0x54 0x18 0x05 0x00 0x00 "State: PW=OFF RF=/2 BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF" 0 0
+
+# Cirrus VGA read-only + tuning + bit-preservation + non-Cirrus safety tests
+$null    = Assert-Run " /v"              0 0 0x54 0x18 0x05 0x00 0x00 "VGA:   SR0F=10 SR16=D8 SR17=31 SR1F=1C VIO=2T" 0
+$null    = Assert-Run " /vio"            0 0 0x54 0x18 0x05 0x00 0x00 "VGA:   SR0F=10 SR16=18 SR17=31 SR1F=1C VIO=1T" 1
+if ($vgaRegs[0x16] -ne 0x18 -or $vgaRegs[0x1F] -ne 0x1C) { throw "VGA reg mismatch after /vio" }
+$null    = Assert-Run " /vm"             0 0 0x54 0x18 0x05 0x00 0x00 "VGA:   SR0F=10 SR16=18 SR17=31 SR1F=1E VIO=1T" 1
+if ($vgaRegs[0x1F] -ne 0x1E) { throw "VGA SR1F mismatch after /vm" }
+$null    = Assert-Run " /pw /r8 /br4 /at- /vio /vm57" 0 4 0xD4 0x1A 0x05 0x03 0x03 "VGA:   SR0F=10 SR16=18 SR17=31 SR1F=20 VIO=1T" 2
+if ($vgaRegs[0x16] -ne 0x18 -or $vgaRegs[0x1F] -ne 0x20) { throw "VGA reg mismatch after /vm57" }
+$null    = Assert-Run " /vm61"           0 0 0xD4 0x1A 0x05 0x03 0x03 "VGA:   SR0F=10 SR16=18 SR17=31 SR1F=22 VIO=1T" 1
+$null    = Assert-Run " /vm64"           0 0 0xD4 0x1A 0x05 0x03 0x03 "VGA:   SR0F=10 SR16=18 SR17=31 SR1F=24 VIO=1T" 1
+$null    = Assert-Run " /vio- /vm-"      0 0 0xD4 0x1A 0x05 0x03 0x03 "VGA:   SR0F=10 SR16=D8 SR17=31 SR1F=1C VIO=2T" 2
+# Verify SR16 b5:0 and SR1F b7:6 are preserved
+$vgaRegs[0x16] = 0xE5; $vgaRegs[0x1F] = 0x5C
+$null    = Assert-Run " /vio /vm57"      0 0 0xD4 0x1A 0x05 0x03 0x03 "VGA:   SR0F=10 SR16=25 SR17=31 SR1F=60 VIO=1T" 2
+# Verify non-Cirrus card aborts safely with RC=2 and ZERO ACC or VGA writes
+$vgaPresent = $false
+$null    = Assert-Run " /pw- /vio /vm57" 2 0 0xD4 0x1A 0x05 0x03 0x03 "Cirrus CL-GD542x VGA not detected" 0
+$vgaPresent = $true
+# Verify /OFF resets ACC registers without touching VGA
+$hwRegs[4] = 0x95; $hwRegs[5] = 0x1B; $hwRegs[0x18] = 0x13; $hwRegs[0x19] = 0xA7
+$null    = Assert-Run " /0"              0 5 0x15 0x18 0x05 0x00 0xA0 "State: PW=OFF RF=/2 BR=OFF AT=ON W486=STD CASW=2T PWWS=1WS L2=ON" 0 0
+if ($vgaRegs[0x16] -ne 0x25 -or $vgaRegs[0x1F] -ne 0x60) { throw "/0 unexpectedly modified VGA regs" }
 
 $hash = (Get-FileHash $outPath -Algorithm SHA256).Hash
 Write-Host "Built $outPath ($($bytes.Length) bytes), $testCount/$testCount emulation tests passed!"
