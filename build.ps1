@@ -247,7 +247,7 @@ $bytes = Assemble-Asm $asmPath
 [System.IO.File]::WriteAllBytes($outPath, $bytes)
 
 # ---- 8086 Emulator Test Harness ----
-$hwRegs = @{ 0x04 = 0x54; 0x05 = 0x18; 0x0B = 0x05; 0x18 = 0x00 }
+$hwRegs = @{ 0x04 = 0x54; 0x05 = 0x18; 0x0B = 0x05; 0x18 = 0x00; 0x19 = 0x00 }
 
 function Run-Emu([string]$cmdTail) {
     $mem = New-Object byte[] 0x10000
@@ -259,7 +259,7 @@ function Run-Emu([string]$cmdTail) {
 
     $r = @(0,0,0,0, 0xFFFE, 0, 0, 0) # ax,cx,dx,bx,sp,bp,si,di
     $ip = 0x100; $zf=$false; $cf=$false; $df=$true; $iflag=$true
-    $idx = 0; $ioBad = $false; $writes = 0; $out = ""; $rc = -1
+    $idx = 0; $ioBad = $false; $writes = 0; $writeOrder = New-Object System.Collections.Generic.List[byte]; $out = ""; $rc = -1
 
     $getR8 = { param($n) if ($n -lt 4) { $r[$n] -band 0xFF } else { ($r[$n-4] -shr 8) -band 0xFF } }
     $setR8 = { param($n,$v) $v = $v -band 0xFF; if ($n -lt 4) { $r[$n] = ($r[$n] -band 0xFF00) -bor $v } else { $r[$n-4] = ($r[$n-4] -band 0x00FF) -bor ($v -shl 8) } }
@@ -383,7 +383,7 @@ function Run-Emu([string]$cmdTail) {
                 $port = $mem[$script:ip++]; $al = $r[0] -band 0xFF
                 if ($iflag) { $ioBad = $true }
                 if ($port -eq 0xF2) { $idx = $al }
-                elseif ($port -eq 0xF3) { $hwRegs[$idx] = $al; $writes++ }
+                elseif ($port -eq 0xF3) { $hwRegs[$idx] = $al; $writes++; $writeOrder.Add([byte]$idx) }
                 elseif ($port -ne 0xED) { throw "OUT $port" }
             }
             0xE4 {
@@ -403,45 +403,54 @@ function Run-Emu([string]$cmdTail) {
         }
         if ($rc -ge 0) { break }
     }
-    return @{ Rc=$rc; Out=$out; Writes=$writes; Safe=($iflag -and -not $ioBad) }
+    return @{ Rc=$rc; Out=$out; Writes=$writes; Order=$writeOrder.ToArray(); Safe=($iflag -and -not $ioBad) }
 }
 
-function Assert-Run([string]$cmd, [int]$expRc, [int]$expWrites, [byte]$e04, [byte]$e05, [byte]$e0b, [byte]$e18, [string]$mustContain) {
+$testCount = 0
+function Assert-Run([string]$cmd, [int]$expRc, [int]$expWrites, [byte]$e04, [byte]$e05, [byte]$e0b, [byte]$e18, [byte]$e19, [string]$mustContain) {
+    $script:testCount++
     $res = Run-Emu $cmd
     if (-not $res.Safe) { throw "IF safety failed on '$cmd'" }
     if ($res.Rc -ne $expRc) { throw "RC mismatch on '$cmd': got $($res.Rc) expected $expRc" }
     if ($res.Writes -ne $expWrites) { throw "Write count mismatch on '$cmd': got $($res.Writes) expected $expWrites" }
-    if ($hwRegs[4] -ne $e04 -or $hwRegs[5] -ne $e05 -or $hwRegs[0xB] -ne $e0b -or $hwRegs[0x18] -ne $e18) {
-        throw ("Reg mismatch on '{0}': got 04={1:X2} 05={2:X2} 0B={3:X2} 18={4:X2}" -f $cmd, $hwRegs[4], $hwRegs[5], $hwRegs[0xB], $hwRegs[0x18])
+    if ($hwRegs[4] -ne $e04 -or $hwRegs[5] -ne $e05 -or $hwRegs[0xB] -ne $e0b -or $hwRegs[0x18] -ne $e18 -or $hwRegs[0x19] -ne $e19) {
+        throw ("Reg mismatch on '{0}': got 04={1:X2} 05={2:X2} 0B={3:X2} 18={4:X2} 19={5:X2}" -f $cmd, $hwRegs[4], $hwRegs[5], $hwRegs[0xB], $hwRegs[0x18], $hwRegs[0x19])
     }
     if ($mustContain -and -not $res.Out.Contains($mustContain)) {
         throw "Output mismatch on '$cmd': missing '$mustContain' in:`n$($res.Out)"
     }
-    return $res.Out
+    return $res
 }
 
-$sample0 = Assert-Run ""               0 0 0x54 0x18 0x05 0x00 "State: PW=OFF RF=STD W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /?"            0 0 0x54 0x18 0x05 0x00 "Flags (opt-in"
-$null    = Assert-Run " /PW /?"        0 0 0x54 0x18 0x05 0x00 "Flags (opt-in"
-$null    = Assert-Run " /BOGUS"        1 0 0x54 0x18 0x05 0x00 "Unknown flag"
-$null    = Assert-Run " /PW /BOGUS"    1 0 0x54 0x18 0x05 0x00 "Unknown flag"
-$null    = Assert-Run " /"             1 0 0x54 0x18 0x05 0x00 "Unknown flag"
-$null    = Assert-Run " /r"            0 1 0x54 0x19 0x05 0x00 "State: PW=OFF RF=SLOW W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /pw"           0 1 0xD4 0x19 0x05 0x00 "State: PW=ON RF=SLOW W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /pw-"          0 1 0x54 0x19 0x05 0x00 "State: PW=OFF RF=SLOW W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /pw+/r-/w0-"   0 2 0x94 0x18 0x05 0x00 "State: PW=ON RF=STD W486=STD CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /w0+ /c1+ /p0+" 0 3 0xD4 0x18 0x04 0x10 "State: PW=ON RF=STD W486=0WS CASW=1T PWWS=0WS L2=OFF"
-$null    = Assert-Run " /c1- /p0-"     0 2 0xD4 0x18 0x05 0x00 "State: PW=ON RF=STD W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /pw /r /c1 /p0" 0 4 0xD4 0x19 0x04 0x10 "State: PW=ON RF=SLOW W486=0WS CASW=1T PWWS=0WS L2=OFF"
-$null    = Assert-Run " /off"          0 4 0x54 0x18 0x05 0x00 "State: PW=OFF RF=STD W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " -pw -r"        0 2 0xD4 0x19 0x05 0x00 "State: PW=ON RF=SLOW W486=0WS CASW=2T PWWS=1WS L2=OFF"
-$null    = Assert-Run " /stock"        0 4 0x54 0x18 0x05 0x00 "State: PW=OFF RF=STD W486=0WS CASW=2T PWWS=1WS L2=OFF"
-# Verify L2-enabled board preserves 04h b0 and b6 on /OFF
-$hwRegs[4] = 0x95; $hwRegs[5] = 0x19
-$null    = Assert-Run " /0"            0 4 0x15 0x18 0x05 0x00 "State: PW=OFF RF=STD W486=STD CASW=2T PWWS=1WS L2=ON"
+$sample0 = (Assert-Run ""                0 0 0x54 0x18 0x05 0x00 0x00 "State: PW=OFF RF=STD BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF").Out
+$null    = Assert-Run " /?"              0 0 0x54 0x18 0x05 0x00 0x00 "Flags (opt-in"
+$null    = Assert-Run " /PW /?"          0 0 0x54 0x18 0x05 0x00 0x00 "Flags (opt-in"
+$null    = Assert-Run " /BOGUS"          1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag"
+$null    = Assert-Run " /PW /BOGUS"      1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag"
+$null    = Assert-Run " /BR9"            1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag"
+$null    = Assert-Run " /"               1 0 0x54 0x18 0x05 0x00 0x00 "Unknown flag"
+$null    = Assert-Run " /r"              0 1 0x54 0x19 0x05 0x00 0x00 "State: PW=OFF RF=SLOW BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
+$null    = Assert-Run " /pw"             0 1 0xD4 0x19 0x05 0x00 0x00 "State: PW=ON RF=SLOW BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
+$null    = Assert-Run " /pw-"            0 1 0x54 0x19 0x05 0x00 0x00 "State: PW=OFF RF=SLOW BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
+$null    = Assert-Run " /pw+/r-/w0-"     0 2 0x94 0x18 0x05 0x00 0x00 "State: PW=ON RF=STD BR=OFF AT=ON W486=STD CASW=2T PWWS=1WS L2=OFF"
+$null    = Assert-Run " /w0+ /c1+ /p0+"  0 3 0xD4 0x18 0x04 0x10 0x00 "State: PW=ON RF=STD BR=OFF AT=ON W486=0WS CASW=1T PWWS=0WS L2=OFF"
+$null    = Assert-Run " /c1- /p0-"       0 2 0xD4 0x18 0x05 0x00 0x00 "State: PW=ON RF=STD BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
+$null    = Assert-Run " /at-"            0 1 0xD4 0x18 0x05 0x01 0x00 "State: PW=ON RF=STD BR=OFF AT=OFF W486=0WS CASW=2T PWWS=1WS L2=OFF"
+$rBr     = Assert-Run " /br"             0 2 0xD4 0x18 0x05 0x03 0x03 "State: PW=ON RF=STD BR=4 AT=OFF W486=0WS CASW=2T PWWS=1WS L2=OFF"
+if ($rBr.Order[0] -ne 0x19 -or $rBr.Order[1] -ne 0x18) { throw "Expected 19h written before 18h on /br, got $($rBr.Order -join ',')" }
+$null    = Assert-Run " /br8 /r"         0 3 0xD4 0x19 0x05 0x03 0x07 "State: PW=ON RF=SLOW BR=8 AT=OFF W486=0WS CASW=2T PWWS=1WS L2=OFF"
+$null    = Assert-Run " /br1 /at+"       0 2 0xD4 0x19 0x05 0x02 0x00 "State: PW=ON RF=SLOW BR=1 AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
+$null    = Assert-Run " /br-"            0 2 0xD4 0x19 0x05 0x00 0x00 "State: PW=ON RF=SLOW BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
+$null    = Assert-Run " /pw /r /br4 /at- /c1 /p0" 0 5 0xD4 0x19 0x04 0x13 0x03 "State: PW=ON RF=SLOW BR=4 AT=OFF W486=0WS CASW=1T PWWS=0WS L2=OFF"
+$null    = Assert-Run " /off"            0 5 0x54 0x18 0x05 0x00 0x00 "State: PW=OFF RF=STD BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
+$null    = Assert-Run " -pw -r -br8 -at-" 0 4 0xD4 0x19 0x05 0x03 0x07 "State: PW=ON RF=SLOW BR=8 AT=OFF W486=0WS CASW=2T PWWS=1WS L2=OFF"
+$null    = Assert-Run " /stock"          0 5 0x54 0x18 0x05 0x00 0x00 "State: PW=OFF RF=STD BR=OFF AT=ON W486=0WS CASW=2T PWWS=1WS L2=OFF"
+# Verify L2-enabled board + custom 19h RAS widths preserve unrelated bits on /OFF
+$hwRegs[4] = 0x95; $hwRegs[5] = 0x19; $hwRegs[0x18] = 0x13; $hwRegs[0x19] = 0xA7
+$null    = Assert-Run " /0"              0 5 0x15 0x18 0x05 0x00 0xA0 "State: PW=OFF RF=STD BR=OFF AT=ON W486=STD CASW=2T PWWS=1WS L2=ON"
 
 $hash = (Get-FileHash $outPath -Algorithm SHA256).Hash
-Write-Host "Built $outPath ($($bytes.Length) bytes), 17/17 emulation tests passed!"
+Write-Host "Built $outPath ($($bytes.Length) bytes), $testCount/$testCount emulation tests passed!"
 Write-Host "SHA256: $hash"
 Write-Host "--- Sample no-arg output ---"
 Write-Host $sample0.TrimEnd()

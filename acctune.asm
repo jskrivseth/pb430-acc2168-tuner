@@ -2,13 +2,15 @@
 ;
 ; Usage:
 ;   ACCTUNE                 Read-only register status + help (no writes)
-;   ACCTUNE /PW+  | /PW-    Posted Write ON/OFF (04h b7; may crackle ISA DMA audio)
-;   ACCTUNE /R+   | /R-     Slow DRAM Refresh ON/OFF (05h b1:0; audio-safe)
+;   ACCTUNE /PW+  | /PW-    Posted Write ON/OFF (04h b7)
+;   ACCTUNE /R+   | /R-     Slow DRAM Refresh ON/OFF (05h b1:0)
+;   ACCTUNE /BR1..8 | /BR-  Burst Refresh ON (1-8, /BR=4) / OFF (18h b1, 19h b2:0)
+;   ACCTUNE /AT-  | /AT+    AT Bus Refresh OFF/ON (18h b0: 1=disabled, 0=stock)
 ;   ACCTUNE /W0+  | /W0-    486 0-WS Mem Write ON/OFF (04h b6)
 ;   ACCTUNE /C1+  | /C1-    1T/2T CAS Write pulse (0Bh b1:0: 00=1T, 01=2T; exp.)
 ;   ACCTUNE /P0+  | /P0-    0-WS/1-WS Posted Write (18h b4; exp.)
 ;   ACCTUNE /OFF            Reset all tuned bits to safe stock (or /STOCK, /0)
-;   (Shorthand without '+' enables the flag, e.g. ACCTUNE /R or ACCTUNE /PW /R)
+;   (Shorthand without '+' enables the flag, e.g. ACCTUNE /PW /R /BR4 /AT-)
 ;
 ; Build with NASM:
 ;   nasm -f bin acctune.asm -o ACCTUNE.COM
@@ -122,9 +124,9 @@ parse_done:
         cmp     byte [has_chg], 0
         je      show_help
 
-        ; Apply only modified slots in pend_tbl (4 entries x 3 bytes)
+        ; Apply only modified slots in pend_tbl (5 entries x 3 bytes; 19h before 18h)
         mov     si, pend_tbl
-        mov     cx, 4
+        mov     cx, 5
 apply_loop:
         mov     al, [si]            ; reg index
         mov     bh, [si+1]          ; AND mask
@@ -190,37 +192,13 @@ mf_cmp:
         mov     bh, [si+1]          ; keep_mask
         mov     bl, [si+2]          ; set_bits
 
+        cmp     al, 0FDh
+        je      mf_br
         cmp     al, 0FEh
         je      mf_help
         cmp     al, 0FFh
         je      mf_off
 
-        call    stage_slot
-        mov     al, 1
-        ret
-
-mf_help:
-        mov     byte [want_help], 1
-        mov     al, 1
-        ret
-
-mf_off:
-        ; Reset all tuned bits to safe stock: 04 b7=0, 05 b1:0=00, 0B b1:0=01, 18 b4=0
-        mov     al, 0
-        mov     bh, 7Fh
-        mov     bl, 00h
-        call    stage_slot
-        mov     al, 1
-        mov     bh, 0FCh
-        mov     bl, 00h
-        call    stage_slot
-        mov     al, 2
-        mov     bh, 0FCh
-        mov     bl, 01h
-        call    stage_slot
-        mov     al, 3
-        mov     bh, 0EFh
-        mov     bl, 00h
         call    stage_slot
         mov     al, 1
         ret
@@ -234,6 +212,51 @@ mf_skip:
 
 mf_fail:
         xor     al, al
+        ret
+
+mf_br:
+        ; BH = 18h b1 (02h ON / 00h OFF), BL = 19h b2:0 burst count (0..7)
+        push    bx
+        mov     al, 3
+        mov     bh, 0F8h
+        call    stage_slot
+        pop     ax
+        mov     bl, ah
+        mov     al, 4
+        mov     bh, 0FDh
+        call    stage_slot
+        mov     al, 1
+        ret
+
+mf_help:
+        mov     byte [want_help], 1
+        mov     al, 1
+        ret
+
+mf_off:
+        ; Reset all tuned bits to safe stock:
+        ; 04 b7=0, 05 b1:0=00, 0B b1:0=01, 19 b2:0=00, 18 b4=0 & b1:0=00
+        mov     al, 0
+        mov     bh, 7Fh
+        mov     bl, 00h
+        call    stage_slot
+        mov     al, 1
+        mov     bh, 0FCh
+        mov     bl, 00h
+        call    stage_slot
+        mov     al, 2
+        mov     bh, 0FCh
+        mov     bl, 01h
+        call    stage_slot
+        mov     al, 3
+        mov     bh, 0F8h
+        mov     bl, 00h
+        call    stage_slot
+        mov     al, 4
+        mov     bh, 0ECh
+        mov     bl, 00h
+        call    stage_slot
+        mov     al, 1
         ret
 
 ; ---- stage_slot: update pend_tbl[AL] with keep=BH, bits=BL ----
@@ -282,7 +305,7 @@ acc_rmw:
         sti
         ret
 
-; ---- print_status: read live 04h/05h/0Bh/18h and display ----
+; ---- print_status: read live 04h/05h/0Bh/18h/19h and display ----
 print_status:
         mov     al, 04h
         call    acc_read
@@ -296,8 +319,11 @@ print_status:
         mov     al, 18h
         call    acc_read
         mov     [cur_18], al
+        mov     al, 19h
+        call    acc_read
+        mov     [cur_19], al
 
-        ; Line 1: Regs:  04=XX 05=XX 0B=XX 18=XX
+        ; Line 1: Regs:  04=XX 05=XX 0B=XX 18=XX 19=XX
         mov     dx, s_r04
         call    print_str
         mov     al, [cur_04]
@@ -318,7 +344,12 @@ print_status:
         mov     al, [cur_18]
         call    print_hex
 
-        ; Line 2: State: PW=.. RF=.. W486=.. CASW=.T PWWS=.. L2=..
+        mov     dx, s_r19
+        call    print_str
+        mov     al, [cur_19]
+        call    print_hex
+
+        ; Line 2: State: PW=.. RF=.. BR=.. AT=.. W486=.. CASW=.T PWWS=.. L2=..
         mov     dx, s_pw
         call    print_str
         mov     dx, s_off
@@ -340,6 +371,29 @@ ps_pw:
         je      ps_rf
         mov     dx, s_alt
 ps_rf:
+        call    print_str
+
+        mov     dx, s_br
+        call    print_str
+        test    byte [cur_18], 02h
+        jz      ps_br_off
+        mov     al, [cur_19]
+        and     al, 07h
+        add     al, '1'
+        call    print_ch
+        jmp     short ps_br_done
+ps_br_off:
+        mov     dx, s_off
+        call    print_str
+ps_br_done:
+
+        mov     dx, s_at
+        call    print_str
+        mov     dx, s_on
+        test    byte [cur_18], 01h
+        jz      ps_at
+        mov     dx, s_off
+ps_at:
         call    print_str
 
         mov     dx, s_w486
@@ -435,16 +489,31 @@ flag_tbl:
         db 2, 'C1',    2,    0FCh, 00h
         db 3, 'C1+',   2,    0FCh, 00h
         db 3, 'C1-',   2,    0FCh, 01h
-        db 2, 'P0',    3,    0EFh, 10h
-        db 3, 'P0+',   3,    0EFh, 10h
-        db 3, 'P0-',   3,    0EFh, 00h
+        db 2, 'P0',    4,    0EFh, 10h
+        db 3, 'P0+',   4,    0EFh, 10h
+        db 3, 'P0-',   4,    0EFh, 00h
+        db 2, 'AT',    4,    0FEh, 00h
+        db 3, 'AT+',   4,    0FEh, 00h
+        db 3, 'AT-',   4,    0FEh, 01h
+        db 2, 'BR',    0FDh, 02h,  03h
+        db 3, 'BR+',   0FDh, 02h,  03h
+        db 3, 'BR-',   0FDh, 00h,  00h
+        db 3, 'BR1',   0FDh, 02h,  00h
+        db 3, 'BR2',   0FDh, 02h,  01h
+        db 3, 'BR3',   0FDh, 02h,  02h
+        db 3, 'BR4',   0FDh, 02h,  03h
+        db 3, 'BR5',   0FDh, 02h,  04h
+        db 3, 'BR6',   0FDh, 02h,  05h
+        db 3, 'BR7',   0FDh, 02h,  06h
+        db 3, 'BR8',   0FDh, 02h,  07h
         db 0
 
-; Pending RMW slots: (reg_index, and_mask, or_bits)
+; Pending RMW slots: (reg_index, and_mask, or_bits) -- 19h written before 18h
 pend_tbl:
         db 04h, 0FFh, 00h
         db 05h, 0FFh, 00h
         db 0Bh, 0FFh, 00h
+        db 19h, 0FFh, 00h
         db 18h, 0FFh, 00h
 
 has_chg   db 0
@@ -455,23 +524,29 @@ cur_04    db 0
 cur_05    db 0
 cur_0b    db 0
 cur_18    db 0
+cur_19    db 0
 
 msg_hdr   db 'ACCTUNE - ACC 2046/2168 Chipset Tuner', 0Dh, 0Ah, '$'
 msg_bad   db 'ACCTUNE: Unknown flag.', 0Dh, 0Ah, '$'
 msg_help  db 'Flags (opt-in, combinable; omit + to enable):', 0Dh, 0Ah
-          db '  /PW+ /PW-  Posted Write ON/OFF (04h b7; may crackle ISA DMA audio)', 0Dh, 0Ah
-          db '  /R+  /R-   Slow DRAM Refresh ON/OFF (05h b1:0; audio-safe)', 0Dh, 0Ah
-          db '  /W0+ /W0-  486 0-WS Mem Write ON/OFF (04h b6)', 0Dh, 0Ah
-          db '  /C1+ /C1-  1T/2T CAS Write (0Bh b1:0; experimental)', 0Dh, 0Ah
-          db '  /P0+ /P0-  0-WS/1-WS Posted Write (18h b4; experimental)', 0Dh, 0Ah
-          db '  /OFF       Reset all tuned bits to stock (/STOCK, /0)', 0Dh, 0Ah, '$'
+          db '  /PW+ /PW-     Posted Write ON/OFF (04h b7)', 0Dh, 0Ah
+          db '  /R+  /R-      Slow DRAM Refresh ON/OFF (05h b1:0)', 0Dh, 0Ah
+          db '  /BR1..8 /BR-  Burst Refresh ON (1-8, /BR=4) / OFF (18h b1, 19h b2:0)', 0Dh, 0Ah
+          db '  /AT- /AT+     AT Bus Refresh OFF/ON (18h b0)', 0Dh, 0Ah
+          db '  /W0+ /W0-     486 0-WS Mem Write ON/OFF (04h b6)', 0Dh, 0Ah
+          db '  /C1+ /C1-     1T/2T CAS Write (0Bh b1:0; experimental)', 0Dh, 0Ah
+          db '  /P0+ /P0-     0-WS/1-WS Posted Write (18h b4; experimental)', 0Dh, 0Ah
+          db '  /OFF          Reset all tuned bits to stock (/STOCK, /0)', 0Dh, 0Ah, '$'
 
 s_r04     db 'Regs:  04=$'
 s_r05     db ' 05=$'
 s_r0b     db ' 0B=$'
 s_r18     db ' 18=$'
+s_r19     db ' 19=$'
 s_pw      db 0Dh, 0Ah, 'State: PW=$'
 s_rf      db ' RF=$'
+s_br      db ' BR=$'
+s_at      db ' AT=$'
 s_w486    db ' W486=$'
 s_casw    db ' CASW=$'
 s_pwws    db ' PWWS=$'
