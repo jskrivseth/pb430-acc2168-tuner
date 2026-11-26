@@ -69,11 +69,6 @@ Flags (opt-in, combinable; omit + to enable):
   C:\UTILS\ACCTUNE.COM /OFF
   ```
 
-## Notes on ISA DMA Digital Audio & Clean Boot
-
-- Apply `ACCTUNE /PW /R` cleanly at boot (in `AUTOEXEC.BAT` before launching games). On real PB430 / ACC2168GT hardware with ISA Sound Blaster / Aztech digital audio, `/PW+` runs cleanly across games after a clean reboot.
-- Toggling chipset timing registers mid-session (or leaving other experimental timing registers modified without rebooting) was observed to cause ISA DMA audio crackling until rebooted. If you ever encounter audio crackling with a particular sound card or game, disable Posted Write on the fly with `ACCTUNE /PW-` or revert with `ACCTUNE /OFF`.
-
 ## Benchmarks (Real Hardware)
 
 Tested on a **Packard Bell Legend Elite 2038** (PB430 LPX motherboard, ACC Micro 2168GT chipset, 33 MHz FSB, no external L2 cache, PNY QuickChip AMD Am5x86-133 in write-through mode, onboard Cirrus Logic VGA):
@@ -81,8 +76,8 @@ Tested on a **Packard Bell Legend Elite 2038** (PB430 LPX motherboard, ACC Micro
 | Command | `04h` | `05h` | `0Bh` | `18h` | `19h` | `SR16`/`SR1F` | SpeedSys CPU | DOOM `-timedemo demo3` | Notes |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
 | Stock BIOS (`/OFF`) | `54h` | `18h` | `05h` | `00h` | `00h` | `D8`/`1C` | `38.53` | `29.08 FPS` | Baseline (50.1 MHz MCLK) |
-| `ACCTUNE /PW` | `D4h` | `18h` | `05h` | `00h` | `00h` | `D8`/`1C` | `40.54` | `31.37 FPS` | **+5.2% / +7.9% FPS**, clean audio on fresh boot |
-| `ACCTUNE /PW /R` | `D4h` | `19h` | `05h` | `00h` | `00h` | `D8`/`1C` | `40.88` | `31.93 FPS` | **+6.1% / +9.8% FPS**, clean audio on fresh boot |
+| `ACCTUNE /PW` | `D4h` | `18h` | `05h` | `00h` | `00h` | `D8`/`1C` | `40.54` | `31.37 FPS` | **+5.2% / +7.9% FPS**, Posted Write enabled |
+| `ACCTUNE /PW /R` | `D4h` | `19h` | `05h` | `00h` | `00h` | `D8`/`1C` | `40.88` | `31.93 FPS` | **+6.1% / +9.8% FPS**, Posted Write + `/4` DRAM refresh |
 | `ACCTUNE /PW /R /BR4 /AT-` | `D4h` | `19h` | `05h` | `03h` | `03h` | `D8`/`1C` | `41.00` | `32.21 FPS` | **+6.4% / +10.8% FPS**, higher memory bandwidth |
 | `ACCTUNE /PW /R /BR4 /AT- /VM54` | `D4h` | `19h` | `05h` | `03h` | `03h` | `D8`/`1E` | — | `32.38 FPS` | **+11.3% FPS**; 53.7 MHz MCLK crosses Cirrus 0-WS threshold |
 | `ACCTUNE /PW /R /BR4 /AT- /VIO /VM57` | `D4h` | `19h` | `05h` | `03h` | `03h` | `18`/`20` | — | `32.43 FPS` | **+11.5% FPS**; 1T VLB I/O + 57.3 MHz MCLK |
