@@ -8,8 +8,8 @@ Running `ACCTUNE` with **no arguments** is completely **read-only**: it prints t
 
 ```text
 ACCTUNE                     Read-only register status + help (no writes)
-ACCTUNE /PW+  | /PW-        Posted Write ON/OFF (04h b7; may crackle ISA DMA audio)
-ACCTUNE /R+   | /R-         Slow DRAM Refresh ON/OFF (05h b1:0; audio-safe)
+ACCTUNE /PW+  | /PW-        Posted Write ON/OFF (04h b7)
+ACCTUNE /R+   | /R-         Slow DRAM Refresh ON/OFF (05h b1:0)
 ACCTUNE /W0+  | /W0-        486 0-WS Mem Write ON/OFF (04h b6)
 ACCTUNE /C1+  | /C1-        1T/2T CAS Write pulse (0Bh b1:0: 00=1T, 01=2T; experimental)
 ACCTUNE /P0+  | /P0-        0-WS/1-WS Posted Write (18h b4; experimental)
@@ -39,30 +39,24 @@ Flags (opt-in, combinable; omit + to enable):
 
 ### Recommended `AUTOEXEC.BAT` Profiles
 
-- **Everyday DOS gaming with ISA Sound Blaster / Aztech digital audio:**
-  ```bat
-  C:\UTILS\ACCTUNE.COM /R
-  ```
-- **Max performance (benchmarks, silent/FM-only games, non-DMA workloads):**
+- **Recommended everyday profile (best performance, clean digital audio from a fresh boot):**
   ```bat
   C:\UTILS\ACCTUNE.COM /PW /R
   ```
-- **Quickly silence ISA DMA audio crackling before launching a game:**
+- **Conservative fallback (Slow DRAM Refresh only):**
+  ```bat
+  C:\UTILS\ACCTUNE.COM /R
+  ```
+- **Disable Posted Write on the fly or revert everything back to stock:**
   ```bat
   C:\UTILS\ACCTUNE.COM /PW-
-  ```
-  Or revert everything back to stock:
-  ```bat
   C:\UTILS\ACCTUNE.COM /OFF
   ```
 
-## Important Caveat: ISA DMA Digital Audio & Posted Write (`/PW`)
+## Notes on ISA DMA Digital Audio & Clean Boot
 
-On real PB430 / ACC2168GT hardware, enabling **Posted Write (`04h` bit 7)** causes audible **crackling in ISA DMA digital audio** (Sound Blaster / Aztech PCM playback), both with `04h=D4h` (`W0+`) and `04h=94h` (`W0-`), regardless of DRAM refresh setting.
-
-- This is almost certainly why Packard Bell left Posted Write disabled in the PB430 BIOS (Packard Bell Legends shipped with ISA sound cards).
-- Disabling Posted Write (`ACCTUNE /PW-` or `ACCTUNE /OFF`) removes the crackling immediately.
-- **Slow DRAM Refresh (`/R`) alone does not cause audio crackling**, making `ACCTUNE /R` the cleanest always-on tweak for sound-card gaming.
+- Apply `ACCTUNE /PW /R` cleanly at boot (in `AUTOEXEC.BAT` before launching games). On real PB430 / ACC2168GT hardware with ISA Sound Blaster / Aztech digital audio, `/PW+` runs cleanly across games after a clean reboot.
+- Toggling chipset timing registers mid-session (or leaving other experimental timing registers modified without rebooting) was observed to cause ISA DMA audio crackling until rebooted. If you ever encounter audio crackling with a particular sound card or game, disable Posted Write on the fly with `ACCTUNE /PW-` or revert with `ACCTUNE /OFF`.
 
 ## Benchmarks (Real Hardware)
 
@@ -70,9 +64,9 @@ Tested on a **Packard Bell Legend Elite 2038** (PB430 LPX motherboard, ACC Micro
 
 | Command | `04h` | `05h` | `0Bh` | `18h` | SpeedSys CPU | DOOM `-timedemo demo3` | Notes |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| Stock BIOS (`/OFF`) | `54h` | `18h` | `05h` | `00h` | `38.53` | `29.08 FPS` | Baseline, clean audio |
-| `ACCTUNE /PW` | `D4h` | `18h` | `05h` | `00h` | `40.54` | `31.37 FPS` | **+5.2% / +7.9% FPS**; ISA DMA audio crackles |
-| `ACCTUNE /PW /R` | `D4h` | `19h` | `05h` | `00h` | `40.88` | `31.93 FPS` | **+6.1% / +9.8% FPS**; ISA DMA audio crackles |
+| Stock BIOS (`/OFF`) | `54h` | `18h` | `05h` | `00h` | `38.53` | `29.08 FPS` | Baseline |
+| `ACCTUNE /PW` | `D4h` | `18h` | `05h` | `00h` | `40.54` | `31.37 FPS` | **+5.2% / +7.9% FPS**, clean audio on fresh boot |
+| `ACCTUNE /PW /R` | `D4h` | `19h` | `05h` | `00h` | `40.88` | `31.93 FPS` | **+6.1% / +9.8% FPS**, clean audio on fresh boot |
 | `ACCTUNE /PW /C1` | `D4h` | `18h` | `04h` | `00h` | `42.76` | *(unstable)* | Failed SpeedSys extended memtest at 33 MHz on 70 ns SIMMs |
 | `ACCTUNE /PW /P0` | `D4h` | `18h` | `05h` | `10h` | `42.76` | *(crashes)* | Crashed DOOM (`R_MapPlane`) within seconds at 33 MHz |
 
